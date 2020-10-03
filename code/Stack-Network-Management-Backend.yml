@@ -1,0 +1,1098 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: Network creation backend with a StepFunction called by a custom resource. The goal being to map it to a Service Catalog item
+
+Parameters:
+  NameAfix:
+    Type: String
+    Description: The afix to use when naming various components
+  NetworkAccountId:
+    Type: String
+    Description: The ID of the Network account that contains the Transit Gateway. Current account if left empty.
+    AllowedPattern: >-
+      ^([0-9]{12})?$
+  ConfigurationRoleName:
+    Type: String
+    Description: The name of the configuration role that can be assumed from the manager account in all the other accounts in order to manage the network
+    Default: role-network-management
+
+Conditions:
+  UseCurrentAccount: !Equals [ !Ref NetworkAccountId, '' ]
+
+Resources:
+  S3Bucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub ${NameAfix}-networkmanagement-bubble-templates
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+  CRLambdaCallStateMachine:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub custom-resource-lambda-${NameAfix}-networkmanagement
+      Handler: index.lambda_handler
+      Runtime: python3.7
+      Description: Lambda called by the VPC Creation State Machine.
+      Code:
+        ZipFile: |
+          import cfnresponse
+          import json, os, boto3
+          stepfunctions = boto3.client('stepfunctions')
+          creation_statemachine_arn = os.environ['CREATION_STATEMACHINE_ARN']
+          deletion_statemachine_arn = os.environ['DELETION_STATEMACHINE_ARN']
+          update_statemachine_arn = os.environ['UPDATE_STATEMACHINE_ARN']
+          def lambda_handler(event, context):
+            print(json.dumps(event, default=str))
+            try:
+              if event['RequestType'] == 'Create':
+                input = {
+                  'CFCustomResourceEvent': event,
+                  'AppName': event['ResourceProperties']['AppName'],
+                  'VPCCidr': event['ResourceProperties']['VPCCidr'],
+                  'AccountID': event['ResourceProperties']['AccountID'],
+                  'Region': event['ResourceProperties']['Region'],
+                  'NetworkBubble': event['ResourceProperties']['NetworkBubble']
+                }
+                res = stepfunctions.start_execution(
+                    stateMachineArn=creation_statemachine_arn,
+                    input=json.dumps(input, default=str)
+                )
+                print(json.dumps(res, default=str))
+              elif event['RequestType'] == 'Update':
+                for prop in event['ResourceProperties']:
+                  if event['ResourceProperties'][prop] != event['OldResourceProperties'][prop] and prop not in ['NetworkBubble', 'ForceUpdateParameter']:
+                    cfnresponse.send(event, context, cfnresponse.FAILED, {'Error':'Only the "NetworkBubble" property can be updated'})
+                    return
+                change_network_bubble = event['ResourceProperties']['NetworkBubble'] != event['OldResourceProperties']['NetworkBubble']
+                input = {
+                  'CFCustomResourceEvent': event,
+                  'AppName': event['ResourceProperties']['AppName'],
+                  'VPCCidr': event['ResourceProperties']['VPCCidr'],
+                  'AccountID': event['ResourceProperties']['AccountID'],
+                  'Region': event['ResourceProperties']['Region'],
+                  'NetworkBubble': event['ResourceProperties']['NetworkBubble'],
+                  'ChangeNetworkBubble': change_network_bubble
+                }
+                res = stepfunctions.start_execution(
+                    stateMachineArn=update_statemachine_arn,
+                    input=json.dumps(input, default=str)
+                )
+                print(json.dumps(res, default=str))
+              elif event['RequestType'] == 'Delete':
+                if event['PhysicalResourceId'] != event['ResourceProperties']['AppName']:
+                  cfnresponse.send(event, context, cfnresponse.SUCCESS, {})
+                  return
+                input = {
+                  'CFCustomResourceEvent': event,
+                  'AppName': event['ResourceProperties']['AppName'],
+                  'AccountID': event['ResourceProperties']['AccountID'],
+                  'Region': event['ResourceProperties']['Region']
+                }
+                res = stepfunctions.start_execution(
+                    stateMachineArn=deletion_statemachine_arn,
+                    input=json.dumps(input, default=str)
+                )
+                print(json.dumps(res, default=str))
+              else:
+                cfnresponse.send(event, context, cfnresponse.FAILED, {})
+            except Exception as e:
+              responseData = {'Data':str(e)}
+              cfnresponse.send(event, context, cfnresponse.FAILED, responseData)
+      MemorySize: 128
+      Timeout: 10
+      Role: !GetAtt CRLambdaCallStateMachineLambdaRole.Arn
+      Environment:
+        Variables:
+          CREATION_STATEMACHINE_ARN: !Ref VpcCreationStateMachine
+          DELETION_STATEMACHINE_ARN: !Ref VpcDeletionStateMachine
+          UPDATE_STATEMACHINE_ARN: !Ref VpcUpdateStateMachine
+  CRLambdaCallStateMachineLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub role-custom-resource-lambda-${NameAfix}-networkmanagement
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          -
+            Effect: Allow
+            Principal:
+              Service:
+                - !Sub lambda.${AWS::Region}.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        -
+          PolicyName: call-step-function
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              -
+                Sid: StatesOp
+                Effect: Allow
+                Action: states:StartExecution
+                Resource:
+                  - !Ref VpcCreationStateMachine
+                  - !Ref VpcDeletionStateMachine
+                  - !Ref VpcUpdateStateMachine
+      Path: /
+  VpcCreationStateMachine:
+    Type: AWS::StepFunctions::StateMachine
+    Properties:
+      StateMachineName: !Sub statemachine-${NameAfix}-networkmanagement-vpc-creation
+      DefinitionString:
+        !Sub
+          - |-
+            {
+              "Comment": "The state machine controlling the creation of a VPC in an account and configuring it on the Transit Gateway",
+              "StartAt": "VALIDATE_PARAMETERS",
+              "States": {
+                "VALIDATE_PARAMETERS": {
+                  "Type": "Pass",
+                  "Parameters":{
+                    "CFCustomResourceEvent.$": "$.CFCustomResourceEvent",
+                    "AppName.$": "$.AppName",
+                    "VPCCidr.$": "$.VPCCidr",
+                    "AccountID.$": "$.AccountID",
+                    "Region.$": "$.Region",
+                    "NetworkBubble.$": "$.NetworkBubble"
+                  },
+                  "Next": "PREPARE_CREATE_VPC"
+                },
+                "PREPARE_CREATE_VPC": {
+                  "Type": "Task",
+                  "Parameters":{
+                    "Region.$": "$.Region",
+                    "VPCCidr.$": "$.VPCCidr"
+                  },
+                  "Resource": "${LambdaPrepareCreateVpc}",
+                  "ResultPath": "$.VpcCreation",
+                  "Next": "CREATE_VPC",
+                  "Catch": [{"ErrorEquals":["States.ALL"],"Next":"SIGNAL_CF_FAILURE","ResultPath":"$.error"}]
+                },
+                "CREATE_VPC": {
+                  "Type": "Task",
+                  "Parameters":{
+                    "TemplateFileName": "client-vpc",
+                    "AccountId.$": "$.AccountID",
+                    "Region.$": "$.Region",
+                    "StackName.$": "$.AppName",
+                    "StackParameters.$": "$.VpcCreation.StackParameters"
+                  },
+                  "Resource": "${LambdaCreateUpdateCFStack}",
+                  "ResultPath": "$.VPCStack",
+                  "Next": "HAS_TO_WAIT_VPC_CREATION",
+                  "Catch": [{"ErrorEquals":["States.ALL"],"Next":"SIGNAL_CF_FAILURE","ResultPath":"$.error"}]
+                },
+                "HAS_TO_WAIT_VPC_CREATION": {
+                  "Type": "Choice",
+                  "Choices": [
+                    {
+                      "Variable": "$.VPCStack.State",
+                      "StringMatches": "*_IN_PROGRESS",
+                      "Next": "WAIT_VPC"
+                    },
+                    {
+                      "Or":[
+                        {
+                          "Variable": "$.VPCStack.State",
+                          "StringEquals": "CREATE_COMPLETE"
+                        },
+                        {
+                          "Variable": "$.VPCStack.State",
+                          "StringEquals": "UPDATE_COMPLETE"
+                        }
+                      ],
+                      "Next": "PREPARE_LINK_VPC"
+                    }
+                  ],
+                  "Default": "SIGNAL_CF_FAILURE"
+                },
+                "WAIT_VPC": {
+                  "Type": "Wait",
+                  "Seconds": 10,
+                  "Next": "REFRESH_VPC_CREATION_STATUS"
+                },
+                "REFRESH_VPC_CREATION_STATUS": {
+                  "Type": "Task",
+                  "Parameters":{
+                    "Stack.$": "$.VPCStack"
+                  },
+                  "Resource": "${LambdaDescribeCFStack}",
+                  "ResultPath": "$.VPCStack",
+                  "Next": "HAS_TO_WAIT_VPC_CREATION",
+                  "Catch": [{"ErrorEquals":["States.ALL"],"Next":"SIGNAL_CF_FAILURE","ResultPath":"$.error"}]
+                },
+                "PREPARE_LINK_VPC": {
+                  "Type": "Task",
+                  "Parameters":{
+                    "VpcStackArn.$": "$.VPCStack.StackArn",
+                    "VPCCidr.$": "$.VPCCidr"
+                  },
+                  "Resource": "${LambdaPrepareLinkVpc}",
+                  "ResultPath": "$.VpcLink",
+                  "Next": "LINK_VPC",
+                  "Catch": [{"ErrorEquals":["States.ALL"],"Next":"SIGNAL_CF_FAILURE","ResultPath":"$.error"}]
+                },
+                "LINK_VPC": {
+                  "Type": "Task",
+                  "Parameters":{
+                    "TemplateFileName.$": "$.NetworkBubble",
+                    "AccountId": "${NetworkAccount}",
+                    "Region.$": "$.Region",
+                    "StackName.$": "$.AppName",
+                    "StackNamePrefix": "Bubble-",
+                    "StackParameters.$": "$.VpcLink.StackParameters"
+                  },
+                  "Resource": "${LambdaCreateUpdateCFStack}",
+                  "ResultPath": "$.LinkVPCStack",
+                  "Next": "HAS_TO_WAIT_VPC_LINK",
+                  "Catch": [{"ErrorEquals":["States.ALL"],"Next":"SIGNAL_CF_FAILURE","ResultPath":"$.error"}]
+                },
+                "HAS_TO_WAIT_VPC_LINK": {
+                  "Type": "Choice",
+                  "Choices": [
+                    {
+                      "Variable": "$.LinkVPCStack.State",
+                      "StringMatches": "*_IN_PROGRESS",
+                      "Next": "WAIT_VPC_LINK"
+                    },
+                    {
+                      "Or":[
+                        {
+                          "Variable": "$.LinkVPCStack.State",
+                          "StringEquals": "CREATE_COMPLETE"
+                        },
+                        {
+                          "Variable": "$.LinkVPCStack.State",
+                          "StringEquals": "UPDATE_COMPLETE"
+                        }
+                      ],
+                      "Next": "SIGNAL_CF_SUCCESS"
+                    }
+                  ],
+                  "Default": "SIGNAL_CF_FAILURE"
+                },
+                "WAIT_VPC_LINK": {
+                  "Type": "Wait",
+                  "Seconds": 10,
+                  "Next": "REFRESH_VPC_LINK_STATUS"
+                },
+                "REFRESH_VPC_LINK_STATUS": {
+                  "Type": "Task",
+                  "Parameters":{
+                    "Stack.$": "$.LinkVPCStack"
+                  },
+                  "Resource": "${LambdaDescribeCFStack}",
+                  "ResultPath": "$.LinkVPCStack",
+                  "Next": "HAS_TO_WAIT_VPC_LINK",
+                  "Catch": [{"ErrorEquals":["States.ALL"],"Next":"SIGNAL_CF_FAILURE","ResultPath":"$.error"}]
+                },
+                "SIGNAL_CF_SUCCESS": {
+                  "Type": "Task",
+                  "Resource": "${LambdaSuccessCloudFormation}",
+                  "Next": "SUCCESS"
+                },
+                "SUCCESS": {
+                  "Type": "Succeed"
+                },
+                "SIGNAL_CF_FAILURE": {
+                  "Type": "Task",
+                  "Resource": "${LambdaFailCloudFormation}",
+                  "Next": "FAILURE"
+                },
+                "FAILURE": {
+                  "Type": "Fail"
+                }
+              }
+            }
+          - LambdaPrepareCreateVpc: !GetAtt LambdaPrepareCreateVpc.Arn
+            LambdaPrepareLinkVpc: !GetAtt LambdaPrepareLinkVpc.Arn
+            LambdaCreateUpdateCFStack: !GetAtt LambdaCreateUpdateCFStack.Arn
+            LambdaDescribeCFStack: !GetAtt LambdaDescribeCFStack.Arn
+            LambdaSuccessCloudFormation: !GetAtt LambdaSuccessCloudFormation.Arn
+            LambdaFailCloudFormation: !GetAtt LambdaFailCloudFormation.Arn
+            NetworkAccount: !If [ UseCurrentAccount, !Ref AWS::AccountId, !Ref NetworkAccountId ]
+      RoleArn: !GetAtt NetworkManagementStateMachineRole.Arn
+  VpcDeletionStateMachine:
+    Type: AWS::StepFunctions::StateMachine
+    Properties:
+      StateMachineName: !Sub statemachine-${NameAfix}-networkmanagement-vpc-deletion
+      DefinitionString:
+        !Sub
+          - |-
+            {
+              "Comment": "The state machine controlling the destruction of a VPC in an account",
+              "StartAt": "VALIDATE_PARAMETERS",
+              "States": {
+                "VALIDATE_PARAMETERS": {
+                  "Type": "Pass",
+                  "Parameters":{
+                    "CFCustomResourceEvent.$": "$.CFCustomResourceEvent",
+                    "AppName.$": "$.AppName",
+                    "AccountID.$": "$.AccountID",
+                    "Region.$": "$.Region"
+                  },
+                  "Next": "DELETE_VPC_LINK"
+                },
+                "DELETE_VPC_LINK": {
+                  "Type": "Task",
+                  "Parameters":{
+                    "AccountId": "${NetworkAccount}",
+                    "Region.$": "$.Region",
+                    "StackName.$": "$.AppName",
+                    "StackNamePrefix": "Bubble-"
+                  },
+                  "Resource": "${LambdaDeleteCFStack}",
+                  "ResultPath": "$.LinkVPCStack",
+                  "Next": "HAS_TO_WAIT_VPC_LINK_DELETION",
+                  "Catch": [{"ErrorEquals":["States.ALL"],"Next":"SIGNAL_CF_FAILURE","ResultPath":"$.error"}]
+                },
+                "HAS_TO_WAIT_VPC_LINK_DELETION": {
+                  "Type": "Choice",
+                  "Choices": [
+                    {
+                      "Variable": "$.LinkVPCStack.State",
+                      "StringEquals": "DELETE_IN_PROGRESS",
+                      "Next": "WAIT_VPC_LINK"
+                    },
+                    {
+                      "Variable": "$.LinkVPCStack.State",
+                      "StringEquals": "DELETE_COMPLETE",
+                      "Next": "DELETE_VPC"
+                    }
+                  ],
+                  "Default": "SIGNAL_CF_FAILURE"
+                },
+                "WAIT_VPC_LINK": {
+                  "Type": "Wait",
+                  "Seconds": 10,
+                  "Next": "REFRESH_VPC_LINK_DELETION_STATUS"
+                },
+                "REFRESH_VPC_LINK_DELETION_STATUS": {
+                  "Type": "Task",
+                  "Parameters":{
+                    "Stack.$": "$.LinkVPCStack"
+                  },
+                  "Resource": "${LambdaDescribeCFStack}",
+                  "ResultPath": "$.LinkVPCStack",
+                  "Next": "HAS_TO_WAIT_VPC_LINK_DELETION",
+                  "Catch": [{"ErrorEquals":["States.ALL"],"Next":"SIGNAL_CF_FAILURE","ResultPath":"$.error"}]
+                },
+                "DELETE_VPC": {
+                  "Type": "Task",
+                  "Parameters":{
+                    "AccountId.$": "$.AccountID",
+                    "Region.$": "$.Region",
+                    "StackName.$": "$.AppName"
+                  },
+                  "Resource": "${LambdaDeleteCFStack}",
+                  "ResultPath": "$.VPCStack",
+                  "Next": "HAS_TO_WAIT_VPC_DELETION",
+                  "Catch": [{"ErrorEquals":["States.ALL"],"Next":"SIGNAL_CF_FAILURE","ResultPath":"$.error"}]
+                },
+                "HAS_TO_WAIT_VPC_DELETION": {
+                  "Type": "Choice",
+                  "Choices": [
+                    {
+                      "Variable": "$.VPCStack.State",
+                      "StringEquals": "DELETE_IN_PROGRESS",
+                      "Next": "WAIT_VPC"
+                    },
+                    {
+                      "Variable": "$.VPCStack.State",
+                      "StringEquals": "DELETE_COMPLETE",
+                      "Next": "SIGNAL_CF_SUCCESS"
+                    }
+                  ],
+                  "Default": "SIGNAL_CF_FAILURE"
+                },
+                "WAIT_VPC": {
+                  "Type": "Wait",
+                  "Seconds": 10,
+                  "Next": "REFRESH_VPC_DELETION_STATUS"
+                },
+                "REFRESH_VPC_DELETION_STATUS": {
+                  "Type": "Task",
+                  "Parameters":{
+                    "Stack.$": "$.VPCStack"
+                  },
+                  "Resource": "${LambdaDescribeCFStack}",
+                  "ResultPath": "$.VPCStack",
+                  "Next": "HAS_TO_WAIT_VPC_DELETION",
+                  "Catch": [{"ErrorEquals":["States.ALL"],"Next":"SIGNAL_CF_FAILURE","ResultPath":"$.error"}]
+                },
+                "SIGNAL_CF_SUCCESS": {
+                  "Type": "Task",
+                  "Resource": "${LambdaSuccessCloudFormation}",
+                  "Next": "SUCCESS"
+                },
+                "SUCCESS": {
+                  "Type": "Succeed"
+                },
+                "SIGNAL_CF_FAILURE": {
+                  "Type": "Task",
+                  "Resource": "${LambdaFailCloudFormation}",
+                  "Next": "FAILURE"
+                },
+                "FAILURE": {
+                  "Type": "Fail"
+                }
+              }
+            }
+          - LambdaDeleteCFStack: !GetAtt LambdaDeleteCFStack.Arn
+            LambdaDescribeCFStack: !GetAtt LambdaDescribeCFStack.Arn
+            LambdaSuccessCloudFormation: !GetAtt LambdaSuccessCloudFormation.Arn
+            LambdaFailCloudFormation: !GetAtt LambdaFailCloudFormation.Arn
+            NetworkAccount: !If [ UseCurrentAccount, !Ref AWS::AccountId, !Ref NetworkAccountId ]
+      RoleArn: !GetAtt NetworkManagementStateMachineRole.Arn
+  VpcUpdateStateMachine:
+    Type: AWS::StepFunctions::StateMachine
+    Properties:
+      StateMachineName: !Sub statemachine-${NameAfix}-networkmanagement-vpc-update
+      DefinitionString:
+        !Sub
+          - |-
+            {
+              "Comment": "The state machine controlling the update of a VPC in an account and configuring it on the Transit Gateway",
+              "StartAt": "VALIDATE_PARAMETERS",
+              "States": {
+                "VALIDATE_PARAMETERS": {
+                  "Type": "Pass",
+                  "Parameters":{
+                    "CFCustomResourceEvent.$": "$.CFCustomResourceEvent",
+                    "AppName.$": "$.AppName",
+                    "VPCCidr.$": "$.VPCCidr",
+                    "AccountID.$": "$.AccountID",
+                    "Region.$": "$.Region",
+                    "NetworkBubble.$": "$.NetworkBubble",
+                    "ChangeNetworkBubble.$": "$.ChangeNetworkBubble"
+                  },
+                  "Next": "PREPARE_CREATE_VPC"
+                },
+                "PREPARE_CREATE_VPC": {
+                  "Type": "Task",
+                  "Parameters":{
+                    "Region.$": "$.Region",
+                    "VPCCidr.$": "$.VPCCidr"
+                  },
+                  "Resource": "${LambdaPrepareCreateVpc}",
+                  "ResultPath": "$.VpcCreation",
+                  "Next": "CREATE_VPC",
+                  "Catch": [{"ErrorEquals":["States.ALL"],"Next":"SIGNAL_CF_FAILURE","ResultPath":"$.error"}]
+                },
+                "CREATE_VPC": {
+                  "Type": "Task",
+                  "Parameters":{
+                    "TemplateFileName": "client-vpc",
+                    "AccountId.$": "$.AccountID",
+                    "Region.$": "$.Region",
+                    "StackName.$": "$.AppName",
+                    "StackParameters.$": "$.VpcCreation.StackParameters"
+                  },
+                  "Resource": "${LambdaCreateUpdateCFStack}",
+                  "ResultPath": "$.VPCStack",
+                  "Next": "HAS_TO_WAIT_VPC_CREATION",
+                  "Catch": [{"ErrorEquals":["States.ALL"],"Next":"SIGNAL_CF_FAILURE","ResultPath":"$.error"}]
+                },
+                "HAS_TO_WAIT_VPC_CREATION": {
+                  "Type": "Choice",
+                  "Choices": [
+                    {
+                      "Variable": "$.VPCStack.State",
+                      "StringMatches": "*_IN_PROGRESS",
+                      "Next": "WAIT_VPC"
+                    },
+                    {
+                      "Or":[
+                        {
+                          "Variable": "$.VPCStack.State",
+                          "StringEquals": "CREATE_COMPLETE"
+                        },
+                        {
+                          "Variable": "$.VPCStack.State",
+                          "StringEquals": "UPDATE_COMPLETE"
+                        }
+                      ],
+                      "Next": "HAS_TO_CHANGE_NETWORK_BUBBLE"
+                    }
+                  ],
+                  "Default": "SIGNAL_CF_FAILURE"
+                },
+                "WAIT_VPC": {
+                  "Type": "Wait",
+                  "Seconds": 10,
+                  "Next": "REFRESH_VPC_CREATION_STATUS"
+                },
+                "REFRESH_VPC_CREATION_STATUS": {
+                  "Type": "Task",
+                  "Parameters":{
+                    "Stack.$": "$.VPCStack"
+                  },
+                  "Resource": "${LambdaDescribeCFStack}",
+                  "ResultPath": "$.VPCStack",
+                  "Next": "HAS_TO_WAIT_VPC_CREATION",
+                  "Catch": [{"ErrorEquals":["States.ALL"],"Next":"SIGNAL_CF_FAILURE","ResultPath":"$.error"}]
+                },
+                "HAS_TO_CHANGE_NETWORK_BUBBLE": {
+                  "Type": "Choice",
+                  "Choices": [
+                    {
+                      "Variable": "$.ChangeNetworkBubble",
+                      "BooleanEquals": true,
+                      "Next": "DELETE_VPC_LINK"
+                    },
+                    {
+                      "Variable": "$.ChangeNetworkBubble",
+                      "BooleanEquals": false,
+                      "Next": "PREPARE_LINK_VPC"
+                    }
+                  ],
+                  "Default": "SIGNAL_CF_FAILURE"
+                },
+                "DELETE_VPC_LINK": {
+                  "Type": "Task",
+                  "Parameters":{
+                    "AccountId": "${NetworkAccount}",
+                    "Region.$": "$.Region",
+                    "StackName.$": "$.AppName",
+                    "StackNamePrefix": "Bubble-"
+                  },
+                  "Resource": "${LambdaDeleteCFStack}",
+                  "ResultPath": "$.LinkVPCStack",
+                  "Next": "HAS_TO_WAIT_VPC_LINK_DELETION",
+                  "Catch": [{"ErrorEquals":["States.ALL"],"Next":"SIGNAL_CF_FAILURE","ResultPath":"$.error"}]
+                },
+                "HAS_TO_WAIT_VPC_LINK_DELETION": {
+                  "Type": "Choice",
+                  "Choices": [
+                    {
+                      "Variable": "$.LinkVPCStack.State",
+                      "StringEquals": "DELETE_IN_PROGRESS",
+                      "Next": "WAIT_VPC_LINK_DELETION"
+                    },
+                    {
+                      "Variable": "$.LinkVPCStack.State",
+                      "StringEquals": "DELETE_COMPLETE",
+                      "Next": "SAFETY_WAIT_VPC_LINK_DELETION"
+                    }
+                  ],
+                  "Default": "SIGNAL_CF_FAILURE"
+                },
+                "WAIT_VPC_LINK_DELETION": {
+                  "Type": "Wait",
+                  "Seconds": 10,
+                  "Next": "REFRESH_VPC_LINK_DELETION_STATUS"
+                },
+                "REFRESH_VPC_LINK_DELETION_STATUS": {
+                  "Type": "Task",
+                  "Parameters":{
+                    "Stack.$": "$.LinkVPCStack"
+                  },
+                  "Resource": "${LambdaDescribeCFStack}",
+                  "ResultPath": "$.LinkVPCStack",
+                  "Next": "HAS_TO_WAIT_VPC_LINK_DELETION",
+                  "Catch": [{"ErrorEquals":["States.ALL"],"Next":"SIGNAL_CF_FAILURE","ResultPath":"$.error"}]
+                },
+                "SAFETY_WAIT_VPC_LINK_DELETION": {
+                  "Type": "Wait",
+                  "Seconds": 15,
+                  "Next": "PREPARE_LINK_VPC"
+                },
+                "PREPARE_LINK_VPC": {
+                  "Type": "Task",
+                  "Parameters":{
+                    "VpcStackArn.$": "$.VPCStack.StackArn",
+                    "VPCCidr.$": "$.VPCCidr"
+                  },
+                  "Resource": "${LambdaPrepareLinkVpc}",
+                  "ResultPath": "$.VpcLink",
+                  "Next": "LINK_VPC",
+                  "Catch": [{"ErrorEquals":["States.ALL"],"Next":"SIGNAL_CF_FAILURE","ResultPath":"$.error"}]
+                },
+                "LINK_VPC": {
+                  "Type": "Task",
+                  "Parameters":{
+                    "TemplateFileName.$": "$.NetworkBubble",
+                    "AccountId": "${NetworkAccount}",
+                    "Region.$": "$.Region",
+                    "StackName.$": "$.AppName",
+                    "StackNamePrefix": "Bubble-",
+                    "StackParameters.$": "$.VpcLink.StackParameters"
+                  },
+                  "Resource": "${LambdaCreateUpdateCFStack}",
+                  "ResultPath": "$.LinkVPCStack",
+                  "Next": "HAS_TO_WAIT_VPC_LINK",
+                  "Catch": [{"ErrorEquals":["States.ALL"],"Next":"SIGNAL_CF_FAILURE","ResultPath":"$.error"}]
+                },
+                "HAS_TO_WAIT_VPC_LINK": {
+                  "Type": "Choice",
+                  "Choices": [
+                    {
+                      "Variable": "$.LinkVPCStack.State",
+                      "StringMatches": "*_IN_PROGRESS",
+                      "Next": "WAIT_VPC_LINK"
+                    },
+                    {
+                      "Or":[
+                        {
+                          "Variable": "$.LinkVPCStack.State",
+                          "StringEquals": "CREATE_COMPLETE"
+                        },
+                        {
+                          "Variable": "$.LinkVPCStack.State",
+                          "StringEquals": "UPDATE_COMPLETE"
+                        }
+                      ],
+                      "Next": "SIGNAL_CF_SUCCESS"
+                    }
+                  ],
+                  "Default": "SIGNAL_CF_FAILURE"
+                },
+                "WAIT_VPC_LINK": {
+                  "Type": "Wait",
+                  "Seconds": 10,
+                  "Next": "REFRESH_VPC_LINK_STATUS"
+                },
+                "REFRESH_VPC_LINK_STATUS": {
+                  "Type": "Task",
+                  "Parameters":{
+                    "Stack.$": "$.LinkVPCStack"
+                  },
+                  "Resource": "${LambdaDescribeCFStack}",
+                  "ResultPath": "$.LinkVPCStack",
+                  "Next": "HAS_TO_WAIT_VPC_LINK",
+                  "Catch": [{"ErrorEquals":["States.ALL"],"Next":"SIGNAL_CF_FAILURE","ResultPath":"$.error"}]
+                },
+                "SIGNAL_CF_SUCCESS": {
+                  "Type": "Task",
+                  "Resource": "${LambdaSuccessCloudFormation}",
+                  "Next": "SUCCESS"
+                },
+                "SUCCESS": {
+                  "Type": "Succeed"
+                },
+                "SIGNAL_CF_FAILURE": {
+                  "Type": "Task",
+                  "Resource": "${LambdaFailCloudFormation}",
+                  "Next": "FAILURE"
+                },
+                "FAILURE": {
+                  "Type": "Fail"
+                }
+              }
+            }
+          - LambdaPrepareCreateVpc: !GetAtt LambdaPrepareCreateVpc.Arn
+            LambdaPrepareLinkVpc: !GetAtt LambdaPrepareLinkVpc.Arn
+            LambdaCreateUpdateCFStack: !GetAtt LambdaCreateUpdateCFStack.Arn
+            LambdaDeleteCFStack: !GetAtt LambdaDeleteCFStack.Arn
+            LambdaDescribeCFStack: !GetAtt LambdaDescribeCFStack.Arn
+            LambdaSuccessCloudFormation: !GetAtt LambdaSuccessCloudFormation.Arn
+            LambdaFailCloudFormation: !GetAtt LambdaFailCloudFormation.Arn
+            NetworkAccount: !If [ UseCurrentAccount, !Ref AWS::AccountId, !Ref NetworkAccountId ]
+      RoleArn: !GetAtt NetworkManagementStateMachineRole.Arn
+  NetworkManagementStateMachineRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub role-statemachine-${NameAfix}-networkmanagement
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - !Sub states.${AWS::Region}.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: StatesExecutionPolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action: lambda:InvokeFunction
+                Resource:
+                  - !GetAtt LambdaPrepareCreateVpc.Arn
+                  - !GetAtt LambdaPrepareLinkVpc.Arn
+                  - !GetAtt LambdaCreateUpdateCFStack.Arn
+                  - !GetAtt LambdaDeleteCFStack.Arn
+                  - !GetAtt LambdaDescribeCFStack.Arn
+                  - !GetAtt LambdaSuccessCloudFormation.Arn
+                  - !GetAtt LambdaFailCloudFormation.Arn
+      Path: /
+  LambdaPrepareCreateVpc:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub lambda-${NameAfix}-networkmanagement-prepare-create-vpc
+      Handler: index.lambda_handler
+      Runtime: python3.7
+      Description: Lambda called by the VPC Creation State Machine.
+      Code:
+        ZipFile: |
+          import json, os, boto3, ipaddress
+          configuration_role_name = os.environ['CONFIGURATION_ROLE_NAME']
+          network_account_id = os.environ['NETWORK_ACCOUNT_ID']
+          transit_gateway_name = os.environ['TRANSIT_GATEWAY_NAME']
+          sts = boto3.client('sts')
+          def get_transit_gateway_id(region):
+            creds = sts.assume_role(
+              RoleArn = f'arn:aws:iam::{network_account_id}:role/{configuration_role_name}',
+              RoleSessionName = 'NetworkManagement',
+              DurationSeconds = 900
+            )['Credentials']
+            ec2 = boto3.client('ec2', region_name=region,
+              aws_access_key_id = creds['AccessKeyId'],
+              aws_secret_access_key = creds['SecretAccessKey'],
+              aws_session_token = creds['SessionToken']
+            )
+            tmp = ec2.describe_transit_gateways()
+            tgws = tmp['TransitGateways']
+            while 'NextToken' in tmp:
+              tmp = ec2.describe_transit_gateways(NextToken=tmp['NextToken'])
+              tgws.extend(tmp['TransitGateways'])
+            return [tgw['TransitGatewayId'] for tgw in tgws if {t['Key']:t['Value'] for t in tgw.get('Tags', {})}.get('Name') == transit_gateway_name][0]
+          def lambda_handler(event, context):
+            print(json.dumps(event, default=str))
+            vpc = ipaddress.ip_network(event['VPCCidr'])
+            priv1, priv2, priv3, others = vpc.subnets(2)
+            pub1, pub2, pub3, loc1, loc2, loc3, spare1, spare2 = others.subnets(3)
+            return {
+              'StackParameters': {
+                'TransitGatewayId': get_transit_gateway_id(event['Region']),
+                'VPCCidr': str(vpc),
+                'PubSub1Cidr': str(pub1),
+                'PubSub2Cidr': str(pub2),
+                'PubSub3Cidr': str(pub3),
+                'PrivSub1Cidr': str(priv1),
+                'PrivSub2Cidr': str(priv2),
+                'PrivSub3Cidr': str(priv3),
+                'LocSub1Cidr': str(loc1),
+                'LocSub2Cidr': str(loc2),
+                'LocSub3Cidr': str(loc3),
+              }
+            }
+      MemorySize: 128
+      Timeout: 30
+      Role: !GetAtt NetworkManagementLambdaRole.Arn
+      Environment:
+        Variables:
+          NETWORK_ACCOUNT_ID: !If [ UseCurrentAccount, !Ref AWS::AccountId, !Ref NetworkAccountId ]
+          CONFIGURATION_ROLE_NAME: !Ref ConfigurationRoleName
+          TRANSIT_GATEWAY_NAME: !Sub tgw-${NameAfix}
+  LambdaPrepareLinkVpc:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub lambda-${NameAfix}-networkmanagement-prepare-link-vpc
+      Handler: index.lambda_handler
+      Runtime: python3.7
+      Description: Lambda called by the VPC Creation State Machine.
+      Code:
+        ZipFile: |
+          import json, os, boto3, ipaddress
+          configuration_role_name = os.environ['CONFIGURATION_ROLE_NAME']
+          sts = boto3.client('sts')
+          def get_tgw_attachment_id(vpc_stack_arn):
+            splited = vpc_stack_arn.split(':')
+            account_id = splited[4]
+            region = splited[3]
+            creds = sts.assume_role(
+              RoleArn = f'arn:aws:iam::{account_id}:role/{configuration_role_name}',
+              RoleSessionName = 'NetworkManagement',
+              DurationSeconds = 900
+            )['Credentials']
+            cf = boto3.client('cloudformation', region_name=region,
+              aws_access_key_id = creds['AccessKeyId'],
+              aws_secret_access_key = creds['SecretAccessKey'],
+              aws_session_token = creds['SessionToken']
+            )
+            vpc_stack = cf.describe_stacks(StackName=vpc_stack_arn)['Stacks'][0]
+            return [
+              o['OutputValue']
+              for o in vpc_stack['Outputs']
+              if o['OutputKey'] == 'TGWAttachementID'
+            ][0]
+          def lambda_handler(event, context):
+            print(json.dumps(event, default=str))
+            vpc_stack_arn = event['VpcStackArn']
+            return {
+              'StackParameters': {
+                'NewAttachmentID': get_tgw_attachment_id(vpc_stack_arn),
+                'NewAttachmentCIDRBlock': event['VPCCidr']
+              }
+            }
+      MemorySize: 128
+      Timeout: 30
+      Role: !GetAtt NetworkManagementLambdaRole.Arn
+      Environment:
+        Variables:
+          CONFIGURATION_ROLE_NAME: !Ref ConfigurationRoleName
+  LambdaCreateUpdateCFStack:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub lambda-${NameAfix}-networkmanagement-create-update-cf-stack
+      Handler: index.lambda_handler
+      Runtime: python3.7
+      Description: Lambda called by the VPC Creation State Machine.
+      Code:
+        ZipFile: |
+          import json, os, boto3
+          from botocore.exceptions import ClientError
+          configuration_role_name = os.environ['CONFIGURATION_ROLE_NAME']
+          template_bucket = os.environ['TEMPLATE_BUCKET']
+          sts = boto3.client('sts')
+          s3 = boto3.client('s3')
+          def create_cfn_stack(account_id, region, stack_name, template_body, parameters):
+            creds = sts.assume_role(
+              RoleArn = f'arn:aws:iam::{account_id}:role/{configuration_role_name}',
+              RoleSessionName = 'NetworkManagement',
+              DurationSeconds = 900
+            )['Credentials']
+            cf = boto3.client('cloudformation', region_name=region,
+              aws_access_key_id = creds['AccessKeyId'],
+              aws_secret_access_key = creds['SecretAccessKey'],
+              aws_session_token = creds['SessionToken']
+            )
+            try:
+              stack_id = cf.describe_stacks(StackName=stack_name)['Stacks'][0]['StackId']
+            except:
+              stack_id = None
+            if stack_id:
+              try:
+                stack_id = cf.update_stack(
+                  StackName=stack_name,
+                  TemplateBody=template_body,
+                  Parameters=[
+                    {
+                      'ParameterKey': k,
+                      'ParameterValue': v
+                    }
+                    for k, v in parameters.items()
+                  ]
+                )['StackId']
+              except ClientError as e:
+                if 'No updates are to be performed' not in str(e):
+                  raise e
+            else:
+              stack_id = cf.create_stack(
+                StackName=stack_name,
+                TemplateBody=template_body,
+                Parameters=[
+                  {
+                    'ParameterKey': k,
+                    'ParameterValue': v
+                  }
+                  for k, v in parameters.items()
+                ],
+                OnFailure='DELETE'
+              )['StackId']
+            return stack_id
+          def lambda_handler(event, context):
+            print(json.dumps(event, default=str))
+            s3_key = f"{event['TemplateFileName']}.yml"
+            template_body = s3.get_object(Bucket=template_bucket, Key=s3_key)['Body'].read().decode()
+            stack_name = f"{event.get('StackNamePrefix', '')}{event['StackName']}"
+            stack_arn = create_cfn_stack(event['AccountId'], event['Region'], stack_name, template_body, event['StackParameters'])
+            return {
+              'StackArn': stack_arn,
+              'State': 'CREATE_IN_PROGRESS'
+            }
+      MemorySize: 128
+      Timeout: 30
+      Role: !GetAtt NetworkManagementLambdaRole.Arn
+      Environment:
+        Variables:
+          CONFIGURATION_ROLE_NAME: !Ref ConfigurationRoleName
+          TEMPLATE_BUCKET: !Ref S3Bucket
+  LambdaDeleteCFStack:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub lambda-${NameAfix}-networkmanagement-delete-cf-stack
+      Handler: index.lambda_handler
+      Runtime: python3.7
+      Description: Lambda called by the Account Creation State Machine.
+      Code:
+        ZipFile: |
+          import json, os, boto3
+          configuration_role_name = os.environ['CONFIGURATION_ROLE_NAME']
+          sts = boto3.client('sts')
+          def delete_cfn_stack(account_id, region, stack_name):
+            creds = sts.assume_role(
+              RoleArn = f'arn:aws:iam::{account_id}:role/{configuration_role_name}',
+              RoleSessionName = 'NetworkManagement',
+              DurationSeconds = 900
+            )['Credentials']
+            cf = boto3.client('cloudformation', region_name=region,
+              aws_access_key_id = creds['AccessKeyId'],
+              aws_secret_access_key = creds['SecretAccessKey'],
+              aws_session_token = creds['SessionToken']
+            )
+            try:
+              stack_id = cf.describe_stacks(StackName=stack_name)['Stacks'][0]['StackId']
+            except:
+              stack_id = None
+            res = cf.delete_stack(StackName=stack_name)
+            return stack_id
+          def lambda_handler(event, context):
+            print(json.dumps(event, default=str))
+            stack_name = f"{event.get('StackNamePrefix', '')}{event['StackName']}"
+            stack_arn = delete_cfn_stack(event['AccountId'], event['Region'], stack_name)
+            return {
+              'StackArn': stack_arn,
+              'State': 'DELETE_IN_PROGRESS' if stack_arn else 'DELETE_COMPLETE'
+            }
+      MemorySize: 128
+      Timeout: 10
+      Role: !GetAtt NetworkManagementLambdaRole.Arn
+      Environment:
+        Variables:
+          CONFIGURATION_ROLE_NAME: !Ref ConfigurationRoleName
+  LambdaDescribeCFStack:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub lambda-${NameAfix}-networkmanagement-describe-cf-stack
+      Handler: index.lambda_handler
+      Runtime: python3.7
+      Description: Lambda called by the Network Management State Machines.
+      Code:
+        ZipFile: |
+          import json, os, boto3
+          configuration_role_name = os.environ['CONFIGURATION_ROLE_NAME']
+          sts = boto3.client('sts')
+          def refresh_cfn_stack_status(stack_arn):
+            splited = stack_arn.split(':')
+            account_id = splited[4]
+            region = splited[3]
+            creds = sts.assume_role(
+              RoleArn = f'arn:aws:iam::{account_id}:role/{configuration_role_name}',
+              RoleSessionName = 'NetworkManagement',
+              DurationSeconds = 900
+            )['Credentials']
+            cf = boto3.client('cloudformation', region_name=region,
+              aws_access_key_id = creds['AccessKeyId'],
+              aws_secret_access_key = creds['SecretAccessKey'],
+              aws_session_token = creds['SessionToken']
+            )
+            return cf.describe_stacks(StackName=stack_arn)['Stacks'][0]['StackStatus']
+          def lambda_handler(event, context):
+            print(json.dumps(event, default=str))
+            stack_arn = event['Stack']['StackArn']
+            return {
+              'StackArn': stack_arn,
+              'State': refresh_cfn_stack_status(stack_arn)
+            }
+      MemorySize: 128
+      Timeout: 30
+      Role: !GetAtt NetworkManagementLambdaRole.Arn
+      Environment:
+        Variables:
+          CONFIGURATION_ROLE_NAME: !Ref ConfigurationRoleName
+  NetworkManagementLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub role-lambda-${NameAfix}-networkmanagement
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          -
+            Effect: Allow
+            Principal:
+              Service:
+                - !Sub lambda.${AWS::Region}.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        -
+          PolicyName: network-management
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              -
+                Sid: AssumeRole
+                Effect: Allow
+                Action:
+                  - sts:AssumeRole
+                Resource:
+                  - !Sub arn:aws:iam::*:role/${ConfigurationRoleName}
+              -
+                Sid: GetObject
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                Resource:
+                  - !Sub ${S3Bucket.Arn}/*
+      Path: /
+  LambdaSuccessCloudFormation:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub lambda-${NameAfix}-networkmanagement-success-cloudformation
+      Handler: index.lambda_handler
+      Runtime: python3.7
+      Description: Lambda called by the Network Management State Machines.
+      Code:
+        ZipFile: |
+          import cfnresponse
+          import json
+          def lambda_handler(event, context):
+            print(json.dumps(event, default=str))
+            orig_event = event['CFCustomResourceEvent']
+            vpc_stack_arn = event['VPCStack']['StackArn']
+            link_vpc_stack_arn = event['LinkVPCStack']['StackArn']
+            cfnresponse.send(
+              orig_event,
+              context,
+              cfnresponse.SUCCESS,
+              {
+                'VpcStackArn': vpc_stack_arn,
+                'LinkVpcStackArn': link_vpc_stack_arn
+              },
+              event['AppName']
+            )
+      MemorySize: 128
+      Timeout: 30
+      Role: !GetAtt BasicLambdaRole.Arn
+  LambdaFailCloudFormation:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub lambda-${NameAfix}-networkmanagement-fail-cloudformation
+      Handler: index.lambda_handler
+      Runtime: python3.7
+      Description: Lambda called by the Network Management State Machines.
+      Code:
+        ZipFile: |
+          import cfnresponse
+          import json
+          def lambda_handler(event, context):
+            print(json.dumps(event, default=str))
+            orig_event = event['CFCustomResourceEvent']
+            cfnresponse.send(orig_event, context, cfnresponse.FAILED, {})
+      MemorySize: 128
+      Timeout: 30
+      Role: !GetAtt BasicLambdaRole.Arn
+  BasicLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub role-lambda-${NameAfix}-networkmanagement-basic
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          -
+            Effect: Allow
+            Principal:
+              Service:
+                - !Sub lambda.${AWS::Region}.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Path: /
+
+
+Outputs:
+  CRLambdaARN:
+    Description: ARN of the CustomResource Lambda
+    Value: !GetAtt CRLambdaCallStateMachine.Arn
+    Export:
+      Name: CustomResourceNetworkManagement

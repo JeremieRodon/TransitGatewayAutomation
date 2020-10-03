@@ -1,0 +1,53 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: VPC creation template that just call the backend Custom Resource
+
+Parameters:
+  AppName:
+    Type: String
+    Description: The name that will be used to tag the newly created resources
+  VPCCidr:
+    Type: String
+    Description: The CIDR of the new VPC, must be between /16 and /23 (because those are VPCs with 9 subnets)
+    AllowedPattern: >-
+      ^([0-9]|1?[0-9]{2}|2[0-4][0-9]|25[0-5])\.([0-9]|1?[0-9]{2}|2[0-4][0-9]|25[0-5])\.([0-9]|1?[0-9]{2}|2[0-4][0-9]|25[0-5])\.([0-9]|1?[0-9]{2}|2[0-4][0-9]|25[0-5])\/(1[6-9]|2[0-3])$
+  AccountID:
+    Type: String
+    Description: The AWS account ID in which we deploy the VPC. Current account if left empty
+    AllowedPattern: >-
+      ^([0-9]{12})?$
+  Region:
+    Type: String
+    Description: The AWS region in which we deploy the new VPC (a Transit Gateway MUST already exist in this region). Current Region if left empty
+    AllowedValues:
+      - eu-west-1
+      - ''
+  NetworkBubble:
+    Type: String
+    Description: The Network "bubble" in which the new VPC will be placed. See doc.
+    Default: shared-services
+    AllowedValues:
+      - app-isolated-dev
+      - app-isolated-prod
+      - shared-services
+      - network
+  ForceUpdateParameter:
+    Type: String
+    Description: This parameter is not used by the stack and its value is irrelevant, but changing it will force an update in case you need it
+
+Conditions:
+  UseCurrentAccount: !Equals [ !Ref AccountID, '' ]
+  UseCurrentRegion: !Equals [ !Ref Region, '' ]
+
+Resources:
+  GlobalNetworkVPC:
+    Type: AWS::CloudFormation::CustomResource
+    Properties:
+      ServiceToken: !ImportValue CustomResourceNetworkManagement
+      AppName: !Ref AppName
+      VPCCidr: !Ref VPCCidr
+      AccountID: !If [ UseCurrentAccount, !Ref 'AWS::AccountId', !Ref AccountID ]
+      Region: !If [ UseCurrentRegion, !Ref 'AWS::Region', !Ref Region ]
+      NetworkBubble: !Ref NetworkBubble
+      ForceUpdateParameter: !Ref ForceUpdateParameter
+
+Outputs: {}

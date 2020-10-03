@@ -1,0 +1,54 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: Network bubble. After a new App VPC is attached to the TGW, handle the TGW RT configurations.
+
+Parameters:
+  NewAttachmentID:
+    Type: String
+    Description: The ID of the attachment
+  NewAttachmentCIDRBlock:
+    Type: String
+    Description: The CIDRBlock of the VPC behind the attachment
+
+Resources:
+###############
+# Association #
+###############
+  # Associate the Network route table to the new attachment
+  NetworkRouteTableAssociation:
+    Type: AWS::EC2::TransitGatewayRouteTableAssociation
+    Properties:
+      TransitGatewayAttachmentId: !Ref NewAttachmentID
+      TransitGatewayRouteTableId: !ImportValue NetworkTGWRTID
+
+################
+# Propagations #
+################
+  # "Propagate" the CIDRblock on the Shared Service route table
+  SharedServicesTGWRouteTableRoutePropagation:
+    Type: AWS::EC2::TransitGatewayRouteTablePropagation
+    Properties:
+      TransitGatewayAttachmentId: !Ref NewAttachmentID
+      TransitGatewayRouteTableId: !ImportValue SharedServicesTGWRTID
+  # "Propagate" the CIDRblock on the AppIsolated Prod route table
+  AppIsolatedProdTGWRouteTableRoutePropagation:
+    Type: AWS::EC2::TransitGatewayRouteTablePropagation
+    Properties:
+      TransitGatewayAttachmentId: !Ref NewAttachmentID
+      TransitGatewayRouteTableId: !ImportValue AppIsolatedProdTGWRTID
+  # "Propagate" the CIDRblock on the AppIsolated Dev route table
+  AppIsolatedDevTGWRouteTableRoutePropagation:
+    Type: AWS::EC2::TransitGatewayRouteTablePropagation
+    Properties:
+      TransitGatewayAttachmentId: !Ref NewAttachmentID
+      TransitGatewayRouteTableId: !ImportValue AppIsolatedDevTGWRTID
+
+###############
+# Black holes #
+###############
+  # "Blackhole" the new App VPC attachment on the Network route table
+  NetworkTGWRouteTableBlackholeRoute:
+    Type: AWS::EC2::TransitGatewayRoute
+    Properties:
+      Blackhole: true
+      DestinationCidrBlock: !Ref NewAttachmentCIDRBlock
+      TransitGatewayRouteTableId: !ImportValue NetworkTGWRTID

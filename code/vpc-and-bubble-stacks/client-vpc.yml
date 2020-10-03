@@ -1,0 +1,370 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: Creates a "client" VPC and attach it to the TransitGateway
+
+Parameters:
+  TransitGatewayId:
+    Type: String
+    Description: The ID of the TransitGateway providing Internet Access
+  VPCCidr:
+    Type: String
+    Description: CIDR Block of the VPC
+  PubSub1Cidr:
+    Type: String
+    Description: CIDR Block of the Public Subnet 1
+  PubSub2Cidr:
+    Type: String
+    Description: CIDR Block of the Public Subnet 2
+  PubSub3Cidr:
+    Type: String
+    Description: CIDR Block of the Public Subnet 3
+  PrivSub1Cidr:
+    Type: String
+    Description: CIDR Block of the Private Subnet 1
+  PrivSub2Cidr:
+    Type: String
+    Description: CIDR Block of the Private Subnet 2
+  PrivSub3Cidr:
+    Type: String
+    Description: CIDR Block of the Private Subnet 3
+  LocSub1Cidr:
+    Type: String
+    Description: CIDR Block of the Local Subnet 1
+  LocSub2Cidr:
+    Type: String
+    Description: CIDR Block of the Local Subnet 2
+  LocSub3Cidr:
+    Type: String
+    Description: CIDR Block of the Local Subnet 3
+Resources:
+# VPC creation
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      CidrBlock: !Ref VPCCidr
+      Tags:
+        - Key: Name
+          Value: !Sub vpc-${AWS::StackName}
+
+# Subnets
+# Public subnets
+  PublicSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: !Ref PubSub1Cidr
+      AvailabilityZone: !Join ['', [!Ref 'AWS::Region', 'a']]
+      Tags:
+        - Key: Network
+          Value: public
+        - Key: Name
+          Value: !Sub subnet-${AWS::StackName}-public-azA
+  PublicSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: !Ref PubSub2Cidr
+      AvailabilityZone: !Join ['', [!Ref 'AWS::Region', 'b']]
+      Tags:
+        - Key: Network
+          Value: public
+        - Key: Name
+          Value: !Sub subnet-${AWS::StackName}-public-azB
+  PublicSubnet3:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: !Ref PubSub3Cidr
+      AvailabilityZone: !Join ['', [!Ref 'AWS::Region', 'c']]
+      Tags:
+        - Key: Network
+          Value: public
+        - Key: Name
+          Value: !Sub subnet-${AWS::StackName}-public-azC
+# Private subnets
+  PrivateSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: !Ref PrivSub1Cidr
+      AvailabilityZone: !Join ['', [!Ref 'AWS::Region', 'a']]
+      Tags:
+        - Key: Network
+          Value: private
+        - Key: Name
+          Value: !Sub subnet-${AWS::StackName}-private-azA
+  PrivateSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: !Ref PrivSub2Cidr
+      AvailabilityZone: !Join ['', [!Ref 'AWS::Region', 'b']]
+      Tags:
+        - Key: Network
+          Value: private
+        - Key: Name
+          Value: !Sub subnet-${AWS::StackName}-private-azB
+  PrivateSubnet3:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: !Ref PrivSub3Cidr
+      AvailabilityZone: !Join ['', [!Ref 'AWS::Region', 'c']]
+      Tags:
+        - Key: Network
+          Value: private
+        - Key: Name
+          Value: !Sub subnet-${AWS::StackName}-private-azC
+# Local subnets => no internet access at all (for databases & endpoints)
+  LocalSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: !Ref LocSub1Cidr
+      AvailabilityZone: !Join ['', [!Ref 'AWS::Region', 'a']]
+      Tags:
+        - Key: Network
+          Value: local
+        - Key: Name
+          Value: !Sub subnet-${AWS::StackName}-local-azA
+  LocalSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: !Ref LocSub2Cidr
+      AvailabilityZone: !Join ['', [!Ref 'AWS::Region', 'b']]
+      Tags:
+        - Key: Network
+          Value: local
+        - Key: Name
+          Value: !Sub subnet-${AWS::StackName}-local-azB
+  LocalSubnet3:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: !Ref LocSub3Cidr
+      AvailabilityZone: !Join ['', [!Ref 'AWS::Region', 'c']]
+      Tags:
+        - Key: Network
+          Value: local
+        - Key: Name
+          Value: !Sub subnet-${AWS::StackName}-local-azC
+# Create gateways (Internet + NAT)
+# Internet gateway
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Sub igw-${AWS::StackName}
+  InternetGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      InternetGatewayId: !Ref InternetGateway
+      VpcId: !Ref VPC
+
+# Create the TransitGateway attachment
+  TGWAttachement:
+    Type: AWS::EC2::TransitGatewayAttachment
+    Properties:
+      VpcId: !Ref VPC
+      TransitGatewayId: !Ref TransitGatewayId
+      SubnetIds:
+        - !Ref LocalSubnet1
+        - !Ref LocalSubnet2
+        - !Ref LocalSubnet3
+      Tags: 
+        - Key: Name
+          Value: !Sub tgw-attachment-${AWS::StackName}
+
+# Routing tables
+# Public
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub rt-${AWS::StackName}-public
+  PublicDefaultRoute:
+    Type: AWS::EC2::Route
+    DependsOn: InternetGatewayAttachment
+    Properties:
+       RouteTableId: !Ref PublicRouteTable
+       DestinationCidrBlock: 0.0.0.0/0
+       GatewayId: !Ref InternetGateway
+  PublicSubnetRouteTableAssociation1:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet1
+      RouteTableId: !Ref PublicRouteTable
+  PublicSubnetRouteTableAssociation2:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet2
+      RouteTableId: !Ref PublicRouteTable
+  PublicSubnetRouteTableAssociation3:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet3
+      RouteTableId: !Ref PublicRouteTable
+# Private (2 tables)
+# Aza
+  PrivateRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub rt-${AWS::StackName}-private
+  PrivateDefaultRoute:
+    Type: AWS::EC2::Route
+    DependsOn: TGWAttachement
+    Properties:
+       RouteTableId: !Ref PrivateRouteTable
+       DestinationCidrBlock: 0.0.0.0/0
+       TransitGatewayId: !Ref TransitGatewayId
+  PrivateSubnetRouteTableAssociation1:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnet1
+      RouteTableId: !Ref PrivateRouteTable
+  PrivateSubnetRouteTableAssociation2:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnet2
+      RouteTableId: !Ref PrivateRouteTable
+  PrivateSubnetRouteTableAssociation3:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnet3
+      RouteTableId: !Ref PrivateRouteTable
+# Local
+  LocalRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub rt-${AWS::StackName}-local
+  LocalSubnetRouteTableAssociation1:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref LocalSubnet1
+      RouteTableId: !Ref LocalRouteTable
+  LocalSubnetRouteTableAssociation2:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref LocalSubnet2
+      RouteTableId: !Ref LocalRouteTable
+  LocalSubnetRouteTableAssociation3:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref LocalSubnet3
+      RouteTableId: !Ref LocalRouteTable
+
+# S3 Endpoint
+  S3Endpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      RouteTableIds:
+        - !Ref PublicRouteTable
+        - !Ref LocalRouteTable
+        - !Ref PrivateRouteTable
+      ServiceName: !Sub com.amazonaws.${AWS::Region}.s3
+      VpcId: !Ref VPC
+# DynDB
+  DynamoDBEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      RouteTableIds:
+        - !Ref PublicRouteTable
+        - !Ref LocalRouteTable
+        - !Ref PrivateRouteTable
+      ServiceName: !Sub com.amazonaws.${AWS::Region}.dynamodb
+      VpcId: !Ref VPC
+
+Outputs:
+# Export the TGW attachment ID
+  TGWAttachementID:
+    Description: TGW Attachment ID
+    Value: !Ref TGWAttachement
+# Export VPC ID & CIDR
+  VPCID:
+    Description: VPC ID
+    Value: !Ref VPC
+    Export:
+      Name: !Sub ${AWS::StackName}:vpcid
+  VPCCIDR:
+    Description: VPC CIDR
+    Value: !GetAtt VPC.CidrBlock
+    Export:
+      Name: !Sub ${AWS::StackName}:vpccidr
+
+# Export subnets ID
+# Publics
+  PublicSubnet1ID:
+    Description: Public subnet 1 ID
+    Value: !Ref PublicSubnet1
+    Export:
+      Name: !Sub ${AWS::StackName}:publicsubnetid1
+  PublicSubnet2ID:
+    Description: Public subnet 2 ID
+    Value: !Ref PublicSubnet2
+    Export:
+      Name: !Sub ${AWS::StackName}:publicsubnetid2
+  PublicSubnet3ID:
+    Description: Public subnet 3 ID
+    Value: !Ref PublicSubnet3
+    Export:
+      Name: !Sub ${AWS::StackName}:publicsubnetid3
+# Private
+  PrivateSubnet1ID:
+    Description: Private subnet 1 ID
+    Value: !Ref PrivateSubnet1
+    Export:
+      Name: !Sub ${AWS::StackName}:privatesubnetid1
+  PrivateSubnet2ID:
+    Description: Private subnet 2 ID
+    Value: !Ref PrivateSubnet2
+    Export:
+      Name: !Sub ${AWS::StackName}:privatesubnetid2
+  PrivateSubnet3ID:
+    Description: Private subnet 3 ID
+    Value: !Ref PrivateSubnet3
+    Export:
+      Name: !Sub ${AWS::StackName}:privatesubnetid3
+# Local
+  LocalSubnet1ID:
+    Description: Local subnet 1 ID
+    Value: !Ref LocalSubnet1
+    Export:
+      Name: !Sub ${AWS::StackName}:localsubnetid1
+  LocalSubnet2ID:
+    Description: Local subnet 2 ID
+    Value: !Ref LocalSubnet2
+    Export:
+      Name: !Sub ${AWS::StackName}:localsubnetid2
+  LocalSubnet3ID:
+    Description: Local subnet 3 ID
+    Value: !Ref LocalSubnet3
+    Export:
+      Name: !Sub ${AWS::StackName}:localsubnetid3
+
+# Export RouteTables id
+  PublicRouteTable:
+    Description: Public Route Table ID
+    Value: !Ref PublicRouteTable
+    Export:
+      Name: !Sub ${AWS::StackName}:publicroutetableid
+  PrivateRouteTable:
+    Description: Private Route Table ID
+    Value: !Ref PrivateRouteTable
+    Export:
+      Name: !Sub ${AWS::StackName}:privateroutetableid
+  LocalRouteTable:
+    Description: Local Route Table ID
+    Value: !Ref LocalRouteTable
+    Export:
+      Name: !Sub ${AWS::StackName}:localroutetableid

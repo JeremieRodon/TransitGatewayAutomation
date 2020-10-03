@@ -1,0 +1,35 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: Create the role used by the Network Management backend
+
+Parameters:
+  ManagerAccountId:
+    Type: String
+    Description: The AWS account ID in which the Network Management Backend is deployed. Current account if left empty
+    AllowedPattern: >-
+      ^([0-9]{12})?$
+  ConfigurationRoleName:
+    Type: String
+    Description: The name of the configuration role that can be assumed from the manager account in order to manage the network
+    Default: role-network-management
+
+Conditions:
+  UseCurrentAccount: !Equals [ !Ref ManagerAccountId, '' ]
+
+Resources:
+  NetworkManagerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Ref ConfigurationRoleName
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          -
+            Effect: Allow
+            Principal:
+              AWS: !If [ UseCurrentAccount, !Ref AWS::AccountId, !Ref ManagerAccountId ]
+            Action:
+              - sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/job-function/NetworkAdministrator
+        - arn:aws:iam::aws:policy/AWSCloudFormationFullAccess
+      Path: /

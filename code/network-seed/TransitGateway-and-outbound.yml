@@ -1,0 +1,455 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: Creates a TGW, shares it with RAM, creates the TGW RouteTables corresponding to bubbles and the outbound network
+
+Parameters:
+  NameAfix:
+    Type: String
+    Description: The afix to use when naming various component
+  OrganizationArn:
+    Type: String
+    Description: The ARN of the AWS Organization to which the Transit Gateway will be share via RAM. If left empty, no RAM share is created.
+
+Conditions:
+  ShareToOrganization: !Not [!Equals [ !Ref OrganizationArn, '' ] ]
+
+Mappings:
+  SubnetConfig:
+    CIDR:
+      VPC: 10.42.255.0/24
+      Public1: 10.42.255.0/27
+      Public2: 10.42.255.32/27
+      Public3: 10.42.255.64/27
+      Private1: 10.42.255.128/27
+      Private2: 10.42.255.160/27
+      Private3: 10.42.255.192/27
+
+Resources:
+#######################################################
+# All Transit Gateway Routes Tables are defined below #
+#######################################################
+  # Create all the Route Tables / Bubbles and create the route(s) to the network attachment
+  # All TGWRT have a default route to the Egress VPC that provides Internet connectivity to app VPCs
+  # The Network RouteTable will be attached to the Egress Internet VPC, a VPN connection or a DX if applicable
+  NetworkTGWRouteTable:
+    Type: AWS::EC2::TransitGatewayRouteTable
+    Properties:
+      TransitGatewayId: !Ref TransitGateway
+      Tags:
+        - Key: Name
+          Value: !Sub tgwrt-${NameAfix}-outbound-network
+  NetworkTGWRouteTableDefaultRoute:
+    Type: AWS::EC2::TransitGatewayRoute
+    Properties:
+      Blackhole: true
+      DestinationCidrBlock: 0.0.0.0/0
+      TransitGatewayRouteTableId: !Ref NetworkTGWRouteTable
+
+  # The Shared Service RouteTable will be attached to the various application VPC
+  # It will not allow app to app communication, only communications to Network and Shared Services
+  SharedServicesTGWRouteTable:
+    Type: AWS::EC2::TransitGatewayRouteTable
+    Properties:
+      TransitGatewayId: !Ref TransitGateway
+      Tags:
+        - Key: Name
+          Value: !Sub tgwrt-${NameAfix}-shared-services
+  SharedServicesTGWRouteTableDefaultRoute:
+    Type: AWS::EC2::TransitGatewayRoute
+    Properties:
+      Blackhole: false
+      DestinationCidrBlock: 0.0.0.0/0
+      TransitGatewayAttachmentId: !Ref EgressVPCTGWAttachement
+      TransitGatewayRouteTableId: !Ref SharedServicesTGWRouteTable
+
+  # The Application RouteTable will be attached to the various application VPC
+  # It will not allow app to app communication, only communications to Network and Shared Services
+  AppIsolatedDevTGWRouteTable:
+    Type: AWS::EC2::TransitGatewayRouteTable
+    Properties:
+      TransitGatewayId: !Ref TransitGateway
+      Tags:
+        - Key: Name
+          Value: !Sub tgwrt-${NameAfix}-app-isolated-dev
+  AppIsolatedDevTGWRouteTableDefaultRoute:
+    Type: AWS::EC2::TransitGatewayRoute
+    Properties:
+      Blackhole: false
+      DestinationCidrBlock: 0.0.0.0/0
+      TransitGatewayAttachmentId: !Ref EgressVPCTGWAttachement
+      TransitGatewayRouteTableId: !Ref AppIsolatedDevTGWRouteTable
+
+  # The Application RouteTable will be attached to the various application VPC
+  # It will not allow app to app communication, only communications to Network and Shared Services
+  AppIsolatedProdTGWRouteTable:
+    Type: AWS::EC2::TransitGatewayRouteTable
+    Properties:
+      TransitGatewayId: !Ref TransitGateway
+      Tags:
+        - Key: Name
+          Value: !Sub tgwrt-${NameAfix}-app-isolated-prod
+  AppIsolatedProdTGWRouteTableDefaultRoute:
+    Type: AWS::EC2::TransitGatewayRoute
+    Properties:
+      Blackhole: false
+      DestinationCidrBlock: 0.0.0.0/0
+      TransitGatewayAttachmentId: !Ref EgressVPCTGWAttachement
+      TransitGatewayRouteTableId: !Ref AppIsolatedProdTGWRouteTable
+
+
+#################################
+# Transit Gateway and RAM share #
+#################################
+  # TransitGateway
+  TransitGateway:
+    Type: AWS::EC2::TransitGateway
+    Properties:
+      AutoAcceptSharedAttachments: enable
+      DefaultRouteTableAssociation: disable
+      DefaultRouteTablePropagation: disable
+      VpnEcmpSupport: enable
+      DnsSupport: enable
+      Description: !Sub Central Transit Gateway in ${AWS::Region} for ${NameAfix}
+      Tags:
+        - Key: Name
+          Value: !Sub tgw-${NameAfix}
+  # Share it via RAM
+  TransitGatewayShare:
+    Type: AWS::RAM::ResourceShare
+    Condition: ShareToOrganization
+    Properties:
+      AllowExternalPrincipals: false
+      Name: TransitGateway
+      Principals:
+        - !Ref OrganizationArn
+      ResourceArns:
+        - !Sub arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:transit-gateway/${TransitGateway}
+      Tags:
+        - Key: Name
+          Value: !Sub TransitGateway Share for ${NameAfix}
+
+#######################
+# Egress Internet VPC #
+#######################
+  # VPC creation
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      CidrBlock:
+        Fn::FindInMap:
+          - SubnetConfig
+          - CIDR
+          - VPC
+      Tags:
+        - Key: Name
+          Value: !Sub vpc-${NameAfix}-egress-internet
+# Subnets
+# Public subnets
+  PublicSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock:
+        Fn::FindInMap:
+          - SubnetConfig
+          - CIDR
+          - Public1
+      AvailabilityZone: !Join ['', [!Ref 'AWS::Region', 'a']]
+      Tags:
+        - Key: Network
+          Value: public
+        - Key: Name
+          Value: !Sub subnet-${NameAfix}-egress-internet-public-A
+  PublicSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock:
+        Fn::FindInMap:
+          - SubnetConfig
+          - CIDR
+          - Public2
+      AvailabilityZone: !Join ['', [!Ref 'AWS::Region', 'b']]
+      Tags:
+        - Key: Network
+          Value: public
+        - Key: Name
+          Value: !Sub subnet-${NameAfix}-egress-internet-public-B
+  PublicSubnet3:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock:
+        Fn::FindInMap:
+          - SubnetConfig
+          - CIDR
+          - Public3
+      AvailabilityZone: !Join ['', [!Ref 'AWS::Region', 'c']]
+      Tags:
+        - Key: Network
+          Value: public
+        - Key: Name
+          Value: !Sub subnet-${NameAfix}-egress-internet-public-C
+# Private subnets
+  PrivateSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock:
+        Fn::FindInMap:
+          - SubnetConfig
+          - CIDR
+          - Private1
+      AvailabilityZone: !Join ['', [!Ref 'AWS::Region', 'a']]
+      Tags:
+        - Key: Network
+          Value: private
+        - Key: Name
+          Value: !Sub subnet-${NameAfix}-egress-internet-private-A
+  PrivateSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock:
+        Fn::FindInMap:
+          - SubnetConfig
+          - CIDR
+          - Private2
+      AvailabilityZone: !Join ['', [!Ref 'AWS::Region', 'b']]
+      Tags:
+        - Key: Network
+          Value: private
+        - Key: Name
+          Value: !Sub subnet-${NameAfix}-egress-internet-private-B
+  PrivateSubnet3:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock:
+        Fn::FindInMap:
+          - SubnetConfig
+          - CIDR
+          - Private3
+      AvailabilityZone: !Join ['', [!Ref 'AWS::Region', 'c']]
+      Tags:
+        - Key: Network
+          Value: private
+        - Key: Name
+          Value: !Sub subnet-${NameAfix}-egress-internet-private-C
+
+# Create gateways and link with TGW(Internet + NAT)
+# Create the TransitGateway attachment
+  EgressVPCTGWAttachement:
+    Type: AWS::EC2::TransitGatewayAttachment
+    Properties:
+      VpcId: !Ref VPC
+      TransitGatewayId: !Ref TransitGateway
+      SubnetIds:
+        - !Ref PrivateSubnet1
+        - !Ref PrivateSubnet2
+        - !Ref PrivateSubnet3
+      Tags: 
+        - Key: Name
+          Value: !Sub tgw-attachment-${NameAfix}-egress-internet
+  # Associate a RouteTable to this attachment
+  EgressVPCTGWAttachementRouteTableAssociation:
+    Type: AWS::EC2::TransitGatewayRouteTableAssociation
+    Properties:
+      TransitGatewayAttachmentId: !Ref EgressVPCTGWAttachement
+      TransitGatewayRouteTableId: !Ref NetworkTGWRouteTable
+
+# Internet gateway
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Sub igw-${NameAfix}-egress-internet
+  InternetGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      InternetGatewayId: !Ref InternetGateway
+      VpcId: !Ref VPC
+# NAT Gateways
+  EIPNATGateway1:
+    DependsOn: InternetGatewayAttachment
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: vpc
+      Tags:
+        - Key: Name
+          Value: !Sub eip-${NameAfix}-natgateway-egress-internet-A
+  NATGateway1:
+     Type: AWS::EC2::NatGateway
+     Properties:
+        AllocationId: !GetAtt EIPNATGateway1.AllocationId
+        SubnetId: !Ref PublicSubnet1
+        Tags:
+          - Key: Name
+            Value: !Sub natgateway-${NameAfix}-egress-internet-A
+  EIPNATGateway2:
+    DependsOn: InternetGatewayAttachment
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: vpc
+      Tags:
+        - Key: Name
+          Value: !Sub eip-${NameAfix}-natgateway-egress-internet-B
+  NATGateway2:
+     Type: AWS::EC2::NatGateway
+     Properties:
+        AllocationId: !GetAtt EIPNATGateway2.AllocationId
+        SubnetId: !Ref PublicSubnet2
+        Tags:
+          - Key: Name
+            Value: !Sub natgateway-${NameAfix}-egress-internet-B
+  EIPNATGateway3:
+    DependsOn: InternetGatewayAttachment
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: vpc
+      Tags:
+        - Key: Name
+          Value: !Sub eip-${NameAfix}-natgateway-egress-internet-C
+  NATGateway3:
+     Type: AWS::EC2::NatGateway
+     Properties:
+        AllocationId: !GetAtt EIPNATGateway3.AllocationId
+        SubnetId: !Ref PublicSubnet3
+        Tags:
+          - Key: Name
+            Value: !Sub natgateway-${NameAfix}-egress-internet-C
+
+# Routing tables
+# Public
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub rt-${NameAfix}-egress-internet-public
+  PublicDefaultRoute:
+    Type: AWS::EC2::Route
+    DependsOn: InternetGatewayAttachment
+    Properties:
+       RouteTableId: !Ref PublicRouteTable
+       DestinationCidrBlock: 0.0.0.0/0
+       GatewayId: !Ref InternetGateway
+  PublicPrivateRoute1:
+    Type: AWS::EC2::Route
+    DependsOn: EgressVPCTGWAttachement
+    Properties:
+       RouteTableId: !Ref PublicRouteTable
+       DestinationCidrBlock: 10.0.0.0/8
+       TransitGatewayId: !Ref TransitGateway
+  PublicPrivateRoute2:
+    Type: AWS::EC2::Route
+    DependsOn: EgressVPCTGWAttachement
+    Properties:
+       RouteTableId: !Ref PublicRouteTable
+       DestinationCidrBlock: 192.168.0.0/16
+       TransitGatewayId: !Ref TransitGateway
+  PublicPrivateRoute3:
+    Type: AWS::EC2::Route
+    DependsOn: EgressVPCTGWAttachement
+    Properties:
+       RouteTableId: !Ref PublicRouteTable
+       DestinationCidrBlock: 172.16.0.0/12
+       TransitGatewayId: !Ref TransitGateway
+  PublicSubnetRouteTableAssociation1:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet1
+      RouteTableId: !Ref PublicRouteTable
+  PublicSubnetRouteTableAssociation2:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet2
+      RouteTableId: !Ref PublicRouteTable
+  PublicSubnetRouteTableAssociation3:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet3
+      RouteTableId: !Ref PublicRouteTable
+# Private (3 tables)
+# Aza
+  PrivateRouteTable1:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub rt-${NameAfix}-egress-internet-private-A
+  PrivateDefaultRoute1:
+    Type: AWS::EC2::Route
+    Properties:
+       RouteTableId: !Ref PrivateRouteTable1
+       DestinationCidrBlock: 0.0.0.0/0
+       NatGatewayId: !Ref NATGateway1
+  PrivateSubnetRouteTableAssociation1:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnet1
+      RouteTableId: !Ref PrivateRouteTable1
+# Azb
+  PrivateRouteTable2:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub rt-${NameAfix}-egress-internet-private-B
+  PrivateDefaultRoute2:
+    Type: AWS::EC2::Route
+    Properties:
+       RouteTableId: !Ref PrivateRouteTable2
+       DestinationCidrBlock: 0.0.0.0/0
+       NatGatewayId: !Ref NATGateway2
+  PrivateSubnetRouteTableAssociation2:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnet2
+      RouteTableId: !Ref PrivateRouteTable2
+# Azc
+  PrivateRouteTable3:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub rt-${NameAfix}-egress-internet-private-C
+  PrivateDefaultRoute3:
+    Type: AWS::EC2::Route
+    Properties:
+       RouteTableId: !Ref PrivateRouteTable3
+       DestinationCidrBlock: 0.0.0.0/0
+       NatGatewayId: !Ref NATGateway3
+  PrivateSubnetRouteTableAssociation3:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnet3
+      RouteTableId: !Ref PrivateRouteTable3
+
+Outputs:
+  NetworkTGWRTID:
+    Description: ID of a TGW Route Table for future reference
+    Value: !Ref NetworkTGWRouteTable
+    Export:
+      Name: NetworkTGWRTID
+  SharedServicesTGWRTID:
+    Description: ID of a TGW Route Table for future reference
+    Value: !Ref SharedServicesTGWRouteTable
+    Export:
+      Name: SharedServicesTGWRTID
+  AppIsolatedDevTGWRTID:
+    Description: ID of a TGW Route Table for future reference
+    Value: !Ref AppIsolatedDevTGWRouteTable
+    Export:
+      Name: AppIsolatedDevTGWRTID
+  AppIsolatedProdTGWRTID:
+    Description: ID of a TGW Route Table for future reference
+    Value: !Ref AppIsolatedProdTGWRouteTable
+    Export:
+      Name: AppIsolatedProdTGWRTID

@@ -1,0 +1,1 @@
+All the lambda are inline in the template, which is bad on the long run. If this system were to be included in a CICD pipeline, it would be great to externalize the lambdas. It will become more and more important, as we plan to add a lot of feature (and code) to this system in the near future.
