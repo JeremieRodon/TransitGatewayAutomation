@@ -22,7 +22,7 @@ Resources:
   S3Bucket:
     Type: AWS::S3::Bucket
     Properties:
-      BucketName: !Sub ${NameAfix}-networkmanagement-bubble-templates
+      BucketName: !Sub ${NameAfix}-networkmanagement-templates
       BucketEncryption:
         ServerSideEncryptionConfiguration:
           - ServerSideEncryptionByDefault:
@@ -80,9 +80,6 @@ Resources:
                 )
                 print(json.dumps(res, default=str))
               elif event['RequestType'] == 'Delete':
-                if event['PhysicalResourceId'] != event['ResourceProperties']['AppName']:
-                  cfnresponse.send(event, context, cfnresponse.SUCCESS, {})
-                  return
                 input = {
                   'CFCustomResourceEvent': event,
                   'AppName': event['ResourceProperties']['AppName'],
@@ -175,7 +172,7 @@ Resources:
                 "CREATE_VPC": {
                   "Type": "Task",
                   "Parameters":{
-                    "TemplateFileName": "client-vpc",
+                    "TemplateFileName": "vpc",
                     "AccountId.$": "$.AccountID",
                     "Region.$": "$.Region",
                     "StackName.$": "$.AppName",
@@ -355,7 +352,7 @@ Resources:
                   "Choices": [
                     {
                       "Variable": "$.LinkVPCStack.State",
-                      "StringEquals": "DELETE_IN_PROGRESS",
+                      "StringMatches": "*_IN_PROGRESS",
                       "Next": "WAIT_VPC_LINK"
                     },
                     {
@@ -398,7 +395,7 @@ Resources:
                   "Choices": [
                     {
                       "Variable": "$.VPCStack.State",
-                      "StringEquals": "DELETE_IN_PROGRESS",
+                      "StringMatches": "*_IN_PROGRESS",
                       "Next": "WAIT_VPC"
                     },
                     {
@@ -486,7 +483,7 @@ Resources:
                 "CREATE_VPC": {
                   "Type": "Task",
                   "Parameters":{
-                    "TemplateFileName": "client-vpc",
+                    "TemplateFileName": "vpc",
                     "AccountId.$": "$.AccountID",
                     "Region.$": "$.Region",
                     "StackName.$": "$.AppName",
@@ -570,7 +567,7 @@ Resources:
                   "Choices": [
                     {
                       "Variable": "$.LinkVPCStack.State",
-                      "StringEquals": "DELETE_IN_PROGRESS",
+                      "StringMatches": "*_IN_PROGRESS",
                       "Next": "WAIT_VPC_LINK_DELETION"
                     },
                     {

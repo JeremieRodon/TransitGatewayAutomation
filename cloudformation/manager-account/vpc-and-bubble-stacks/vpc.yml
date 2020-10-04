@@ -1,5 +1,5 @@
 AWSTemplateFormatVersion: 2010-09-09
-Description: Creates a "client" VPC and attach it to the TransitGateway
+Description: Creates a VPC and attach it to the TransitGateway
 
 Parameters:
   TransitGatewayId:

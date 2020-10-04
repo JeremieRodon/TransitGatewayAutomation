@@ -1,5 +1,7 @@
 AWSTemplateFormatVersion: 2010-09-09
-Description: App Isolated Prod bubble. After a new App VPC is attached to the TGW, handle the TGW RT configurations.
+Description: |
+  App Isolated Prod bubble. After a new App VPC is attached to
+  the TGW, handle the TGW RT configurations.
 
 Parameters:
   NewAttachmentID:
