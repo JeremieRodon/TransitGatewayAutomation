@@ -595,7 +595,7 @@ Resources:
                 },
                 "SAFETY_WAIT_VPC_LINK_DELETION": {
                   "Type": "Wait",
-                  "Seconds": 15,
+                  "Seconds": 60,
                   "Next": "PREPARE_LINK_VPC"
                 },
                 "PREPARE_LINK_VPC": {
