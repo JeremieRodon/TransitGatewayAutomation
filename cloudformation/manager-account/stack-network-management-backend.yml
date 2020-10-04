@@ -80,6 +80,9 @@ Resources:
                 )
                 print(json.dumps(res, default=str))
               elif event['RequestType'] == 'Delete':
+                if event['PhysicalResourceId'] != event['ResourceProperties']['AppName']:
+                  cfnresponse.send(event, context, cfnresponse.SUCCESS, {})
+                  return
                 input = {
                   'CFCustomResourceEvent': event,
                   'AppName': event['ResourceProperties']['AppName'],

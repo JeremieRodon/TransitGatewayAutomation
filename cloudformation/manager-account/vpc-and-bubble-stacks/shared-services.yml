@@ -44,7 +44,7 @@ Resources:
       TransitGatewayAttachmentId: !Ref NewAttachmentID
       TransitGatewayRouteTableId: !ImportValue AppIsolatedProdTGWRTID
   # "Propagate" the CIDRblock on the AppIsolated Dev route table
-  SAppIsolatedDevTGWRouteTableRoutePropagation:
+  AppIsolatedDevTGWRouteTableRoutePropagation:
     Type: AWS::EC2::TransitGatewayRouteTablePropagation
     Properties:
       TransitGatewayAttachmentId: !Ref NewAttachmentID
