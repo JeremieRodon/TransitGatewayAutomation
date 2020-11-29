@@ -5,6 +5,9 @@ Parameters:
   NameAfix:
     Type: String
     Description: The afix to use when naming various component
+    Default: reinvent
+    AllowedPattern: >-
+      ^([a-z][a-z0-9]{0,15})$
   OrganizationArn:
     Type: String
     Description: The ARN of the AWS Organization to which the Transit Gateway will be share via RAM. If left empty, no RAM share is created.

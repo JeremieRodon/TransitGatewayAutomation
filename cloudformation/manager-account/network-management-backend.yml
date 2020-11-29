@@ -5,6 +5,9 @@ Parameters:
   NameAfix:
     Type: String
     Description: The afix to use when naming various components
+    Default: reinvent
+    AllowedPattern: >-
+      ^([a-z][a-z0-9]{0,15})$
   NetworkAccountId:
     Type: String
     Description: The ID of the Network account that contains the Transit Gateway. Current account if left empty.
@@ -22,7 +25,10 @@ Resources:
   S3Bucket:
     Type: AWS::S3::Bucket
     Properties:
-      BucketName: !Sub ${NameAfix}-networkmanagement-templates
+      BucketName:
+        !Sub
+          - ${NameAfix}-networkmanagement-templates-${rand}
+          - rand: !Select [0, !Split [-, !Select [2, !Split [/, !Ref AWS::StackId ]]]]
       BucketEncryption:
         ServerSideEncryptionConfiguration:
           - ServerSideEncryptionByDefault:
@@ -179,6 +185,7 @@ Resources:
                     "AccountId.$": "$.AccountID",
                     "Region.$": "$.Region",
                     "StackName.$": "$.AppName",
+                    "StackNamePrefix": "VPC-",
                     "StackParameters.$": "$.VpcCreation.StackParameters"
                   },
                   "Resource": "${LambdaCreateUpdateCFStack}",
@@ -386,7 +393,8 @@ Resources:
                   "Parameters":{
                     "AccountId.$": "$.AccountID",
                     "Region.$": "$.Region",
-                    "StackName.$": "$.AppName"
+                    "StackName.$": "$.AppName",
+                    "StackNamePrefix": "VPC-"
                   },
                   "Resource": "${LambdaDeleteCFStack}",
                   "ResultPath": "$.VPCStack",
@@ -490,6 +498,7 @@ Resources:
                     "AccountId.$": "$.AccountID",
                     "Region.$": "$.Region",
                     "StackName.$": "$.AppName",
+                    "StackNamePrefix": "VPC-",
                     "StackParameters.$": "$.VpcCreation.StackParameters"
                   },
                   "Resource": "${LambdaCreateUpdateCFStack}",
@@ -735,6 +744,8 @@ Resources:
           network_account_id = os.environ['NETWORK_ACCOUNT_ID']
           transit_gateway_name = os.environ['TRANSIT_GATEWAY_NAME']
           sts = boto3.client('sts')
+          # This function retrieves the Transit Gateway ID in the given AWS region
+          # The Transit Gateway will be found by its name, if more than one Transit Gateway is found or none, it will fail.
           def get_transit_gateway_id(region):
             creds = sts.assume_role(
               RoleArn = f'arn:aws:iam::{network_account_id}:role/{configuration_role_name}',
@@ -751,12 +762,17 @@ Resources:
             while 'NextToken' in tmp:
               tmp = ec2.describe_transit_gateways(NextToken=tmp['NextToken'])
               tgws.extend(tmp['TransitGateways'])
-            return [tgw['TransitGatewayId'] for tgw in tgws if {t['Key']:t['Value'] for t in tgw.get('Tags', {})}.get('Name') == transit_gateway_name][0]
+            tgws = [tgw['TransitGatewayId'] for tgw in tgws if {t['Key']:t['Value'] for t in tgw.get('Tags', [])}.get('Name') == transit_gateway_name]
+            assert len(tgws) == 1, 'There can be only one'
+            return tgws[0]
           def lambda_handler(event, context):
             print(json.dumps(event, default=str))
             vpc = ipaddress.ip_network(event['VPCCidr'])
+            # Cut the VPC in 4 subnets, 3 of which will be our private subnets
             priv1, priv2, priv3, others = vpc.subnets(2)
+            # Cut the reminder subnet into 8 subnets, 3 public, 3 protected and 2 useless
             pub1, pub2, pub3, loc1, loc2, loc3, spare1, spare2 = others.subnets(3)
+            # Return the parameters value for the vpc.yml template
             return {
               'StackParameters': {
                 'TransitGatewayId': get_transit_gateway_id(event['Region']),
