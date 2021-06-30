@@ -3,7 +3,7 @@ This repository provides you with the code base allowing to test the Transit Gat
 In order to better leverage this solution, it is nice to either have seen the AWS re:invent session or read the [Transit Gateway blog posts](https://blog.revolve.team/2020/11/05/focus-sur-aws-transit-gateway-partie-2/) that you can find on the Devoteam|Revolve website.
 
 # Table of Contents
-1. [Disclamer](#disclamer)
+1. [Disclaimer](#disclaimer)
 2. [Solution overview](#solution-overview)
 3. [Installation instructions](#installation-instructions)
 4. [Create a new VPC](#create-a-new-vpc)
@@ -12,14 +12,14 @@ In order to better leverage this solution, it is nice to either have seen the AW
 7. [How to change the VPC](#how-to-change-the-VPC)
 8. [Why is the update failing when I update parameters other than the bubble name?](#why-is-the-update-failing-when-i-update-parameters-other-than-the-bubble-name)
 
-# Disclamer
+# Disclaimer
 Although I did my best to make this repository useful and understandable, I'm relying on the fact that you are already black-belt of CloudFormation. Indeed, even if I provide CloudFormation code in this README, I do not explain it to much and I take for granted that you do know how to read and interpret it.
 
 # Solution overview
 The initial setup will roughly look like this:
 ![overview1](images/overview1.png)
 The important thing to note is that we distinguish between 3 different account types:
-- The **Network** account is hosting the Transi tGateway and its initial setup (that is, Routing Tables corresponding to **bubbles** and the Outbound VPC allowing to reach the Internet);
+- The **Network** account is hosting the Transit Gateway and its initial setup (that is, Routing Tables corresponding to **bubbles** and the Outbound VPC allowing to reach the Internet);
 - The **Managed** accounts (e.g. Shared Services) are the accounts in which we will create VPCs that we want to attach to the TransitGateway;
 - The **Manager** account is the one that perform all the magic, it hosts the Step Functions that will coordinate the actions in both the Network account and a Managed account in order to create and attach a new VPC to the Transit Gateway.
 
@@ -35,15 +35,15 @@ Ok lets setup this thing.
 
 ## Assign accounts to different roles
 First, be clear about which AWS accounts you want to use to perform each of the 3 roles described above:
-- Network
-- Manager
-- Managed
+- Network (1 account)
+- Manager (1 account)
+- Managed (multiple accounts)
 
 In this guide, I will assume that you use the same AWS account for all 3 roles, but you can also do it with different accounts. Obviously I would even **recommend** to separate the roles in different AWS accounts for a production environment.
 
 ## Prepare the *Managed* accounts
 First thing first, something must be done in all the *Managed* accounts and the *Network* account.
-Indeed the *Manager* account needs an AWS IAM Role in order to perform the different tasks that are needed to create and attach a VPC to a Transit Gateway.
+The *Manager* account needs an AWS IAM Role in order to perform the different tasks that are needed to create and attach a VPC to a Transit Gateway.
 
 ### 1. Use the CloudFormation template *cloudformation/all-managed-accounts/role-network-management.yml* in order to create the IAM Role needed.
 The template is very simple, it creates an IAM Role that trust the *Manager* account to assume it.
@@ -56,15 +56,15 @@ Here are the parameters:
 
 \* *It is not a CloudFormation default value, but it is the value that will be used if the parameter is left empty*
 
-The role has two policy attached: NetworkAdministrator and AWSCloudFormationFullAccess allowing it to Create/Update/Delete the stacks we need, and furthermore to manage the VPCs (and sub-resources like subnets, route tables and so on)
+The role has two policies attached: NetworkAdministrator and AWSCloudFormationFullAccess allowing it to Create/Update/Delete the stacks we need, and furthermore to manage the VPCs (and sub-resources like subnets, route tables and so on)
 
 For this test, you can leave all parameter values as they are when creating the stack.
 
-In an AWS Organization context with dozens or hundreds of AWS accounts, you should consider using [StackSets](https://docs.aws.amazon.com/organizations/latest/userguide/services-that-can-integrate-cloudformation.html).
+In an AWS Organization context with dozens or hundreds of AWS accounts, you should consider using [StackSets](https://docs.aws.amazon.com/organizations/latest/userguide/services-that-can-integrate-cloudformation.html) to deploy this IAM role everywhere.
 
 ## Prepare the *Network* account
-The *Network* account must already have the foundations laid out for this system to work. Indeed, the TransitGateway and all the "Bubbles" (i.e. the Transit Gateway Route Tables) must exist before we attempt the create any VPC.
-Additionally, we will also create the *Outbound* VPC that will provide Internet access to VPCs attached to the Transit Gateway. This is only required in our use-case, again don't hesitate to spend 30 minutes watching this talk to understand why.
+The *Network* account must already have the foundations laid out for this system to work: the Transit Gateway and all the "Bubbles" (i.e. the Transit Gateway Route Tables) must exist before we attempt the create any VPC.
+Additionally, we will also create the *Outbound* VPC that will provide Internet access to VPCs attached to the Transit Gateway. This is only required in our use-case, if you understand French don't hesitate to spend 30 minutes watching [this talk](https://www.youtube.com/watch?v=v6Izn56oQbY) to understand why.
 
 ### 2. Use the CloudFormation template *cloudformation/network-account/transit-gateway-and-outbound.yml* in order to create the TransitGateway and the *Outbound* VPC
 Here are the parameters:
@@ -83,7 +83,7 @@ This is a fairly heavy template that will create the following:
 - An S3 bucket that will host CloudFormation templates, see further;
 - A Lambda written in Python 3 (and its role) that is intended to be used as a [CloudFormation Custom Resource](https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/template-custom-resources.html);
 - Three Step Functions State Machines (and their shared role) that will be used to perform the Create/Update/Delete operations of the above Custom Resource Lambda;
-- A bunch of Lambdas (written in Python 3) that will be called by the State Machines. Most of them share the same IAM Role allowing them to assume the role create at Step 1 and to read objects from the S3 Bucket created by this template.
+- A bunch of Lambdas (written in Python 3) that will be called by the State Machines. Most of them share the same IAM Role allowing them to assume the role created at Step 1 in the managed accounts and to read objects from the S3 Bucket created by this template.
 
 All the Lambda's source codes are directly inside the template, which is not really easy to read but also avoid the need for 9 more installation steps :)
 
